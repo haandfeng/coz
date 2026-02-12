@@ -111,7 +111,9 @@ def _coz_run(args):
 
   if args.fixed_speedup != None:
     env['COZ_FIXED_SPEEDUP'] = str(args.fixed_speedup)
-
+    
+  if args.warmup is not None:
+    env['COZ_WARMUP'] = str(args.warmup)
   try:
     result = subprocess.call(args.remaining_args, env=env)
   except KeyboardInterrupt:
@@ -495,6 +497,11 @@ _run_parser.add_argument('--fixed-speedup',
                          metavar='<speedup> (0-100)',
                          type=int, choices=list(range(0, 101)), default=None,
                          help='Evaluate optimizations of a specific amount')
+
+_run_parser.add_argument('--warmup', '-w',
+                         metavar='<seconds>',
+                         type=int, default=None,
+                         help='Warmup delay in seconds before using samples (default: 0, no warmup)')
 
 # Use defaults to recover handler function and parser object from parser output
 _run_parser.set_defaults(func=_coz_run, parser=_run_parser)
