@@ -1,0 +1,24 @@
+startup	time=1771575323065373820	hit_callchains_enabled=true
+experiment	selected=/home/tyf/repos/coz/benchmarks/toy/toy.cpp:23	speedup=0.55	duration=6203284915	selected-samples=3266
+throughput-point	name=/home/tyf/repos/coz/benchmarks/toy/toy.cpp:49	delta=8
+experiment	selected=/home/tyf/repos/coz/benchmarks/toy/toy.cpp:18	speedup=0.95	duration=2461238839	selected-samples=5830
+throughput-point	name=/home/tyf/repos/coz/benchmarks/toy/toy.cpp:49	delta=7
+experiment	selected=/home/tyf/repos/coz/benchmarks/toy/toy.cpp:18	speedup=0.70	duration=3419814570	selected-samples=6475
+throughput-point	name=/home/tyf/repos/coz/benchmarks/toy/toy.cpp:49	delta=9
+experiment	selected=/home/tyf/repos/coz/benchmarks/toy/toy.cpp:23	speedup=0.00	duration=8000055957	selected-samples=4001
+throughput-point	name=/home/tyf/repos/coz/benchmarks/toy/toy.cpp:49	delta=9
+experiment	selected=/home/tyf/repos/coz/benchmarks/toy/toy.cpp:18	speedup=0.00	duration=8000057227	selected-samples=7996
+throughput-point	name=/home/tyf/repos/coz/benchmarks/toy/toy.cpp:49	delta=9
+experiment	selected=/home/tyf/repos/coz/benchmarks/toy/toy.cpp:18	speedup=0.80	duration=2950083622	selected-samples=6312
+throughput-point	name=/home/tyf/repos/coz/benchmarks/toy/toy.cpp:49	delta=8
+experiment	selected=/home/tyf/repos/coz/benchmarks/toy/toy.cpp:18	speedup=0.00	duration=8000057199	selected-samples=7890
+throughput-point	name=/home/tyf/repos/coz/benchmarks/toy/toy.cpp:49	delta=10
+experiment	selected=/home/tyf/repos/coz/benchmarks/toy/toy.cpp:18	speedup=0.65	duration=3417786434	selected-samples=7049
+throughput-point	name=/home/tyf/repos/coz/benchmarks/toy/toy.cpp:49	delta=9
+experiment	selected=/home/tyf/repos/coz/benchmarks/toy/toy.cpp:18	speedup=0.65	duration=3485926668	selected-samples=6936
+throughput-point	name=/home/tyf/repos/coz/benchmarks/toy/toy.cpp:49	delta=9
+experiment	selected=/home/tyf/repos/coz/benchmarks/toy/toy.cpp:18	speedup=0.65	duration=3415837908	selected-samples=7052
+throughput-point	name=/home/tyf/repos/coz/benchmarks/toy/toy.cpp:49	delta=8
+runtime	time=96518128902
+samples	location=/home/tyf/repos/coz/benchmarks/toy/toy.cpp:18	count=79393
+samples	location=/home/tyf/repos/coz/benchmarks/toy/toy.cpp:23	count=39608

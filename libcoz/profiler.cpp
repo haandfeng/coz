@@ -39,6 +39,7 @@
 #include <limits>
 #include <random>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "inspect.h"
@@ -90,6 +91,28 @@ static string line_to_json_string(const line* l) {
   return json_escape(f->get_name() + ":" + to_string(l->get_line()));
 }
 
+#ifndef __APPLE__
+/// Build callchain string from perf record: "file1:line1|file2:line2|...|leaf_file:leaf_line" (root to leaf)
+static string build_callchain_string(perf_event::record& r) {
+  string result;
+  line* leaf = memory_map::get_instance().find_line(r.get_ip()).get();
+  if (!leaf) return "";
+
+  vector<string> parts;
+  for (uint64_t pc : r.get_callchain()) {
+    shared_ptr<line> l = memory_map::get_instance().find_line(pc - 1);
+    if (l) parts.push_back(line_to_json_string(l.get()));
+  }
+  parts.push_back(line_to_json_string(leaf));
+
+  for (size_t i = 0; i < parts.size(); i++) {
+    if (i > 0) result += "|";
+    result += parts[i];
+  }
+  return result;
+}
+#endif
+
 /// Check if a line is from the coz.h instrumentation header
 static bool is_coz_header(const line* l) {
   auto f = l->get_file();
@@ -108,8 +131,10 @@ void profiler::startup(const string& outfile,
                        line* fixed_line,
                        int fixed_speedup,
                        bool end_to_end,
+                       bool use_callchain,
                        size_t warmup_delay_ns) {
   _warmup_delay_ns = warmup_delay_ns;
+  _use_callchain = use_callchain;
   // Set up the sampling signal handler.
   // On macOS, use the __asm-bound original sigaction to bypass our own
   // DYLD interposition which blocks setting handlers for coz's signals.
@@ -217,10 +242,22 @@ void profiler::profiler_thread(spinlock& l) {
 
   // Log the start of this execution
   if(_json_output) {
-    output << "{\"type\":\"startup\",\"time\":" << start_time << "}\n";
+    output << "{\"type\":\"startup\",\"time\":" << start_time;
+#ifndef __APPLE__
+    if(_use_callchain) {
+      output << ",\"hit_callchains_enabled\":true";
+    }
+#endif
+    output << "}\n";
   } else {
     output << "startup\t"
-           << "time=" << start_time << "\n";
+           << "time=" << start_time;
+#ifndef __APPLE__
+    if(_use_callchain) {
+      output << "\thit_callchains_enabled=true";
+    }
+#endif
+    output << "\n";
   }
 
   // Unblock the main thread
@@ -406,11 +443,37 @@ void profiler::profiler_thread(spinlock& l) {
     // Low-delta experiments (e.g., from warmup, end-of-benchmark, or boundary
     // effects) have unreliable throughput measurements that corrupt the baseline.
     if(min_delta >= ExperimentTargetDelta) {
+#ifndef __APPLE__
+      unordered_map<string, size_t> merged_hit_callchains;
+      if (_use_callchain) {
+        _thread_states.for_each([&merged_hit_callchains](pid_t tid, thread_state* state) {
+          state->_hit_callchain_lock.lock();
+          for (const auto& p : state->_hit_callchains) {
+            merged_hit_callchains[p.first] += p.second;
+          }
+          state->_hit_callchains.clear();
+          state->_hit_callchain_lock.unlock();
+        });
+      }
+#endif
       if(_json_output) {
         output << "{\"type\":\"experiment\",\"selected\":\"" << line_to_json_string(selected) << "\","
                << "\"speedup\":" << speedup << ","
                << "\"duration\":" << duration << ","
-               << "\"selected_samples\":" << selected_samples << "}\n";
+               << "\"selected_samples\":" << selected_samples;
+#ifndef __APPLE__
+        if (_use_callchain && !merged_hit_callchains.empty()) {
+          output << ",\"hit_callchains\":[";
+          bool first = true;
+          for (const auto& p : merged_hit_callchains) {
+            if (!first) output << ",";
+            output << "{\"chain\":\"" << json_escape(p.first) << "\",\"count\":" << p.second << "}";
+            first = false;
+          }
+          output << "]";
+        }
+#endif
+        output << "}\n";
       } else {
         output << "experiment\t"
                << "selected=" << selected << "\t"
@@ -742,8 +805,19 @@ void profiler::process_samples(thread_state* state) {
 
       if(_experiment_active) {
         // Add a delay if the sample is in the selected line
-        if(sampled_line.second)
+        if(sampled_line.second) {
           state->local_delay.fetch_add(_delay_size.load());
+#ifndef __APPLE__
+          if (_use_callchain && r.get_callchain().size() > 0) {
+            string chain = build_callchain_string(r);
+            if (!chain.empty()) {
+              state->_hit_callchain_lock.lock();
+              state->_hit_callchains[chain]++;
+              state->_hit_callchain_lock.unlock();
+            }
+          }
+#endif
+        }
 
       } else if(sampled_line.first != nullptr && _next_line.load() == nullptr
                 && !is_coz_header(sampled_line.first)) {

@@ -352,6 +352,97 @@ div.plot:hover .source-toggle {
   display: none;
 }
 
+/* Callchain toggle (Hit Callchains panel) - bottom-left of card to avoid overlap */
+.callchain-toggle {
+  position: absolute;
+  bottom: 4px;
+  left: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  color: #10b981;
+  opacity: 0.85 !important;
+  transition: opacity 0.15s ease, color 0.15s ease;
+  z-index: 2;
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+
+div.plot:hover .callchain-toggle {
+  opacity: 1;
+}
+
+.callchain-toggle:hover {
+  color: #34d399;
+}
+
+.callchain-toggle.active {
+  opacity: 1;
+  color: #10b981;
+}
+
+/* Raise the plot's stacking context when callchain panel is open */
+div.plot.callchain-open {
+  z-index: 20;
+}
+
+.callchain-panel {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  z-index: 10;
+  margin-top: 2px;
+  background: var(--bg-card, #1a1a38);
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.15));
+  border-radius: 0 0 var(--border-radius-sm, 6px) var(--border-radius-sm, 6px);
+  font-size: 11px;
+  max-height: 200px;
+  overflow-y: auto;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+
+.callchain-header {
+  padding: 6px 10px;
+  font-weight: 600;
+  color: var(--text-primary, #e2e8f0);
+  border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+}
+
+.callchain-list {
+  padding: 4px 0;
+}
+
+.callchain-entry {
+  display: flex;
+  flex-wrap: wrap;
+  padding: 4px 10px;
+  gap: 8px;
+  border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.06));
+}
+
+.callchain-entry:last-child {
+  border-bottom: none;
+}
+
+.callchain-count {
+  color: var(--text-muted, #64748b);
+  flex-shrink: 0;
+  min-width: 60px;
+}
+
+.callchain-chain {
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 10px;
+  color: var(--text-secondary, #94a3b8);
+  word-break: break-all;
+}
+
+.callchain-empty {
+  padding: 12px 10px;
+  color: var(--text-muted, #64748b);
+  margin: 0;
+}
+
 /* Raise the plot's stacking context when source panel is open */
 div.plot.source-open {
   z-index: 20;

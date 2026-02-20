@@ -10,7 +10,14 @@
 
 #include <atomic>
 
+#include "ccutil/spinlock.h"
 #include "ccutil/timer.h"
+#include "perf.h"
+
+#ifndef __APPLE__
+#include <string>
+#include <unordered_map>
+#endif
 
 class thread_state {
 public:
@@ -20,6 +27,11 @@ public:
   timer process_timer;      //< The timer that triggers sample processing for this thread
   size_t pre_block_time;    //< The time saved before (possibly) blocking
   std::atomic<bool> is_blocked{false};  //< True between pre_block() and post_block(); skip delays
+
+#ifndef __APPLE__
+  spinlock _hit_callchain_lock;
+  std::unordered_map<std::string, size_t> _hit_callchains;  //< callchain_str -> count (Linux only)
+#endif
   
   inline void set_in_use(bool value) {
     in_use = value;

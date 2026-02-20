@@ -5,6 +5,10 @@ const _source_cache = {};
 let _source_server_available = null;
 // Track which plot name currently has source panel open (null = none)
 let _source_open_name = null;
+// Track which plot name currently has callchain panel open (null = none)
+let _callchain_open_name = null;
+// Set from profile file when type===startup and hit_callchains_enabled is true
+let _hit_callchains_enabled = false;
 // AI optimization panel state
 let _optimize_open_name = null;
 const _optimize_cache = {};
@@ -882,6 +886,7 @@ class Profile {
         this._plot_legend = legend;
         this._get_min_points = get_min_points;
         this._display_warning = display_warning;
+        _hit_callchains_enabled = false;
         let lines = profile_text.split('\n');
         let experiment = null;
         for (let i = 0; i < lines.length; i++) {
@@ -889,7 +894,9 @@ class Profile {
                 continue;
             let entry = parseLine(lines[i]);
             if (entry.type === 'startup') {
-                // Do nothing
+                if (entry.hit_callchains_enabled === true || entry.hit_callchains_enabled === 'true') {
+                    _hit_callchains_enabled = true;
+                }
             }
             else if (entry.type === 'shutdown') {
                 // Do nothing
@@ -945,6 +952,14 @@ class Profile {
         // Add new delta and duration to data
         entry.delta += point.delta;
         entry.duration += experiment.duration;
+        // Merge hit_callchains from experiment (when callchain recording was enabled)
+        if (experiment.hit_callchains && experiment.hit_callchains.length > 0) {
+            if (!entry.hit_callchains)
+                entry.hit_callchains = {};
+            for (const hc of experiment.hit_callchains) {
+                entry.hit_callchains[hc.chain] = (entry.hit_callchains[hc.chain] || 0) + hc.count;
+            }
+        }
     }
     addLatencyMeasurement(experiment, point) {
         let entry = this.ensureDataEntry(experiment.selected, point.name, experiment.speedup, {
@@ -1045,9 +1060,30 @@ class Profile {
                 }
             }
             if (points_with_enough > 0) {
+                // Aggregate hit_callchains for this selected line (across all points and speedups)
+                const merged = {};
+                for (const pp of progress_points) {
+                    const point_data = this._data[selected][pp];
+                    if (!point_data)
+                        continue;
+                    for (const speedup in point_data) {
+                        const ent = point_data[speedup];
+                        if (ent && ent.hit_callchains) {
+                            for (const chain in ent.hit_callchains) {
+                                merged[chain] = (merged[chain] || 0) + ent.hit_callchains[chain];
+                            }
+                        }
+                    }
+                }
+                const hit_callchains_list = Object.keys(merged).length > 0
+                    ? Object.keys(merged).map(chain => ({ chain, count: merged[chain] })).sort((a, b) => b.count - a.count)
+                    : undefined;
+                if (hit_callchains_list)
+                    _hit_callchains_enabled = true;
                 result.push({
                     name: selected,
-                    progress_points: points
+                    progress_points: points,
+                    hit_callchains: hit_callchains_list
                 });
             }
         }
@@ -1215,9 +1251,12 @@ class Profile {
                 let wasOpen = (_source_open_name === name);
                 // Close all panels everywhere
                 container.selectAll('.source-panel').remove();
+                container.selectAll('.callchain-panel').remove();
                 container.selectAll('.source-toggle').classed('active', false);
-                container.selectAll('div.plot').classed('source-open', false);
+                container.selectAll('.callchain-toggle').classed('active', false);
+                container.selectAll('div.plot').classed('source-open', false).classed('callchain-open', false);
                 _source_open_name = null;
+                _callchain_open_name = null;
                 if (wasOpen)
                     return;
                 // Open this one
@@ -1248,6 +1287,74 @@ class Profile {
                 });
             });
             source_btn_sel.exit().remove();
+        }
+        /****** Add callchain toggle buttons (only when hit_callchains_enabled) ******/
+        if (_hit_callchains_enabled) {
+            let callchain_btn_sel = plot_div_sel.selectAll('span.callchain-toggle').data(function (d) {
+                return (d.hit_callchains && d.hit_callchains.length > 0) ? [d] : [];
+            });
+            callchain_btn_sel.enter().append('span')
+                .attr('class', 'callchain-toggle')
+                .html('<i class="fa fa-sitemap"></i>')
+                .attr('title', 'Hit callchains')
+                .on('click', function (d) {
+                let wasOpen = (_callchain_open_name === d.name);
+                container.selectAll('.callchain-panel').remove();
+                container.selectAll('.source-panel').remove();
+                container.selectAll('.callchain-toggle').classed('active', false);
+                container.selectAll('.source-toggle').classed('active', false);
+                container.selectAll('div.plot').classed('callchain-open', false).classed('source-open', false);
+                _callchain_open_name = null;
+                _source_open_name = null;
+                if (wasOpen)
+                    return;
+                let btn = d3.select(this);
+                let plotDiv = d3.select(this.parentNode);
+                _callchain_open_name = d.name;
+                btn.classed('active', true);
+                plotDiv.classed('callchain-open', true);
+                let html = '<div class="callchain-header"><i class="fa fa-sitemap"></i> Hit Callchains</div>';
+                if (d.hit_callchains && d.hit_callchains.length > 0) {
+                    const total = d.hit_callchains.reduce((s, h) => s + h.count, 0);
+                    const allPathParts = [];
+                    for (const hc of d.hit_callchains) {
+                        for (const part of hc.chain.split('|')) {
+                            const lastColon = part.lastIndexOf(':');
+                            if (lastColon >= 0)
+                                allPathParts.push(part.substring(0, lastColon));
+                        }
+                    }
+                    const minParts = typeof get_minimum_parts_for_unique_path === 'function'
+                        ? get_minimum_parts_for_unique_path(allPathParts) : 1;
+                    const shortenPart = function (part) {
+                        const lastColon = part.lastIndexOf(':');
+                        if (lastColon < 0) return part;
+                        const path = part.substring(0, lastColon);
+                        const line = part.substring(lastColon + 1);
+                        const shortPath = typeof get_last_path_parts === 'function'
+                            ? get_last_path_parts(minParts, path) : path.split('/').pop() || path;
+                        return shortPath + ':' + line;
+                    };
+                    html += '<div class="callchain-list">';
+                    for (const hc of d.hit_callchains) {
+                        const pct = total > 0 ? (100 * hc.count / total).toFixed(1) : '0';
+                        let chainParts = hc.chain.split('|');
+                        if (chainParts.length > 1 && chainParts[0] === chainParts[chainParts.length - 1]) {
+                            chainParts = chainParts.slice(1);
+                        }
+                        const chainDisplay = chainParts.map(shortenPart).join(' \u2192 ');
+                        html += '<div class="callchain-entry">' +
+                            '<span class="callchain-count">' + hc.count + ' (' + pct + '%)</span>' +
+                            '<span class="callchain-chain">' + escapeHtml(chainDisplay) + '</span></div>';
+                    }
+                    html += '</div>';
+                }
+                else {
+                    html += '<p class="callchain-empty">No callchain data.</p>';
+                }
+                plotDiv.append('div').attr('class', 'callchain-panel').html(html);
+            });
+            callchain_btn_sel.exit().remove();
         }
         /****** Add AI optimization toggle buttons ******/
         if (_optimize_server_available !== false) {

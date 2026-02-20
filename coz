@@ -148,6 +148,9 @@ def _coz_run(args):
   if args.warmup is not None:
     env['COZ_WARMUP'] = str(args.warmup)
 
+  if args.use_callchain:
+    env['COZ_CALLCHAIN'] = '1'
+
   if args.verbose:
     env['COZ_VERBOSE'] = '1'
 
@@ -1374,6 +1377,10 @@ _run_parser.add_argument('--warmup', '-w',
                          metavar='<seconds>',
                          type=int, default=None,
                          help='Warmup delay in seconds before using samples (default: 0, no warmup)')
+
+_run_parser.add_argument('--use-callchain',
+                         action='store_true', default=False,
+                         help='Enable hit callchain recording (Linux only)')
 
 _run_parser.add_argument('--verbose', '-v',
                          action='store_true', default=False,

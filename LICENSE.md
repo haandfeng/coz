@@ -1,4 +1,4 @@
-Original work: _Copyright &copy; 2015, Charlie Curtsinger and Emery Berger, University of Massachusetts Amherst_
+·Original work: _Copyright &copy; 2015, Charlie Curtsinger and Emery Berger, University of Massachusetts Amherst_
 Modified work: _Copyright &copy; 2016, Charlie Curtsinger_
 _All rights reserved._
 

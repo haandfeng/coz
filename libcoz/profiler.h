@@ -68,6 +68,7 @@ public:
                line* fixed_line,
                int fixed_speedup,
                bool end_to_end,
+               bool use_callchain,
                size_t warmup_delay_ns = 0);
 
   /// Shut down the profiler
@@ -268,6 +269,9 @@ private:
 
   /// Should coz run in end-to-end mode?
   bool _enable_end_to_end;
+
+  /// Should hit callchains be recorded (Linux only, when COZ_CALLCHAIN=1)?
+  bool _use_callchain = false;
 
   /// Atomic flag to guarantee shutdown procedures run exactly one time
   std::atomic_flag _shutdown_run = ATOMIC_FLAG_INIT;

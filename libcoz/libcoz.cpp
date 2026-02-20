@@ -192,6 +192,7 @@ void init_coz(void) {
   size_t warmup_sec = 0;
   stringstream(getenv_safe("COZ_WARMUP", "0")) >> warmup_sec;
   size_t warmup_delay_ns = warmup_sec * 1000000000ULL;
+  bool use_callchain = getenv_safe("COZ_CALLCHAIN", "0") == "1";
 
   // Replace 'MAIN' in the binary_scope with the real path of the main executable
   if(binary_scope.find("MAIN") != binary_scope.end()) {
@@ -252,8 +253,8 @@ void init_coz(void) {
                                    fixed_line.get(),
                                    fixed_speedup,
                                    end_to_end,
+                                   use_callchain,
                                    warmup_delay_ns);
-
   // Synchronizations can be intercepted once the profiler has been initialized
   VERBOSE << "init_coz setting initialized=true";
   initialized = true;
