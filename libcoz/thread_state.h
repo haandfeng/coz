@@ -9,6 +9,7 @@
 #define CAUSAL_RUNTIME_THREAD_STATE_H
 
 #include <atomic>
+#include <fstream>
 
 #include "ccutil/spinlock.h"
 #include "ccutil/timer.h"
@@ -27,6 +28,17 @@ public:
   timer process_timer;      //< The timer that triggers sample processing for this thread
   size_t pre_block_time;    //< The time saved before (possibly) blocking
   std::atomic<bool> is_blocked{false};  //< True between pre_block() and post_block(); skip delays
+
+  size_t delayed_local_delay = 0;
+  size_t based_local_delay = 0;
+  size_t pre_local_time = 0;
+  std::atomic<int> process_samples{0};
+  uint64_t ex_count = 1;
+  uint64_t last_sample_time = 0;
+  bool in_wait = false;
+  std::atomic<bool> sync_local_with_global{false};
+  bool enable_print_log = false;
+  std::ofstream fout;
 
 #ifndef __APPLE__
   spinlock _hit_callchain_lock;

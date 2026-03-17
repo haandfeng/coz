@@ -72,6 +72,18 @@ extern "C" void _coz_post_block(int skip_delays) {
   if(initialized) profiler::get_instance().post_block(skip_delays != 0);
 }
 
+extern "C" void _coz_post_block_0() {
+  if(initialized) profiler::get_instance().post_block(false);
+}
+
+extern "C" void _coz_post_block_1() {
+  if(initialized) profiler::get_instance().post_block(true);
+}
+
+extern "C" void _coz_catch_up() {
+  if(initialized) profiler::get_instance().catch_up();
+}
+
 #ifdef __APPLE__
 /**
  * Helper functions called from mac_interpose.cpp
@@ -205,12 +217,21 @@ void init_coz(void) {
 
   end_to_end = getenv("COZ_END_TO_END");
   string fixed_line_name = getenv_safe("COZ_FIXED_LINE", "");
+  string based_line_name = getenv_safe("COZ_BASED_LINE", "");
   int fixed_speedup;
   stringstream(getenv_safe("COZ_FIXED_SPEEDUP", "-1")) >> fixed_speedup;
+  int based_speedup = -1;
+  stringstream(getenv_safe("COZ_BASED_SPEEDUP", "-1")) >> based_speedup;
   size_t warmup_sec = 0;
   stringstream(getenv_safe("COZ_WARMUP", "0")) >> warmup_sec;
   size_t warmup_delay_ns = warmup_sec * 1000000000ULL;
   bool use_callchain = getenv_safe("COZ_CALLCHAIN", "0") == "1";
+  char blocked_scope = 0;
+  string blocked_scope_str = getenv_safe("COZ_BLOCKED_SCOPE", "");
+  if(!blocked_scope_str.empty()) blocked_scope = blocked_scope_str[0];
+  char based_blocked = 0;
+  string based_blocked_str = getenv_safe("COZ_BASED_BLOCKED", "");
+  if(!based_blocked_str.empty()) based_blocked = based_blocked_str[0];
 
   // Replace 'MAIN' in the binary_scope with the real path of the main executable
   if(binary_scope.find("MAIN") != binary_scope.end()) {
@@ -260,6 +281,12 @@ void init_coz(void) {
     REQUIRE(fixed_line) << "Fixed line \"" << fixed_line_name << "\" was not found.";
   }
 
+  shared_ptr<line> based_line;
+  if(!based_line_name.empty()) {
+    based_line = memory_map::get_instance().find_line(based_line_name);
+    REQUIRE(based_line) << "Based line \"" << based_line_name << "\" was not found.";
+  }
+
   // Create an end-to-end progress point and register it if running in
   // end-to-end mode
   if(end_to_end) {
@@ -272,7 +299,11 @@ void init_coz(void) {
                                    fixed_speedup,
                                    end_to_end,
                                    use_callchain,
-                                   warmup_delay_ns);
+                                   warmup_delay_ns,
+                                   blocked_scope,
+                                   based_line.get(),
+                                   based_blocked,
+                                   based_speedup);
   // Synchronizations can be intercepted once the profiler has been initialized
   VERBOSE << "init_coz setting initialized=true";
   initialized = true;

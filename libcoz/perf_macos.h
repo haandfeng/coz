@@ -105,6 +105,11 @@ public:
 
     inline bool is_sample() const { return get_type() == record_type::sample; }
     inline bool is_lost() const { return get_type() == record_type::lost; }
+    inline bool is_lock() const { return false; }
+    inline bool is_sched() const { return false; }
+    inline bool is_io() const { return false; }
+    inline bool is_blocked() const { return false; }
+    inline bool is_blocked_any() const { return false; }
 
     uint64_t get_ip() const;
     uint64_t get_pid() const;
@@ -112,6 +117,7 @@ public:
     uint64_t get_time() const;
     uint32_t get_cpu() const;
     ccutil::wrapped_array<uint64_t> get_callchain() const;
+    uint64_t get_weight() const { return 0; }
 
   private:
     record(record_type type) : _type(type) {}

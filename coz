@@ -150,6 +150,18 @@ def _coz_run(args):
   if args.fixed_line:
     env['COZ_FIXED_LINE'] = args.fixed_line
 
+  if args.blocked_scope is not None:
+    env['COZ_BLOCKED_SCOPE'] = args.blocked_scope
+
+  if args.based_line is not None:
+    env['COZ_BASED_LINE'] = args.based_line
+
+  if args.based_blocked is not None:
+    env['COZ_BASED_BLOCKED'] = args.based_blocked
+
+  if args.based_speedup is not None:
+    env['COZ_BASED_SPEEDUP'] = str(args.based_speedup)
+
   if args.fixed_speedup != None:
     env['COZ_FIXED_SPEEDUP'] = str(args.fixed_speedup)
 
@@ -1400,6 +1412,28 @@ _run_parser.add_argument('--end-to-end',
 _run_parser.add_argument('--fixed-line',
                          metavar='<source file>:<line number>', default=None,
                          help='Evaluate optimizations of a specific source line')
+
+_run_parser.add_argument('--blocked-scope',
+                         metavar='<subclass>',
+                         choices=['o', 'b', 'i', 'l', 's', 'a'],
+                         default=None,
+                         help='Profile specific off-CPU subclass: o=all on-CPU samples, i=blocking I/O, l=lock-waiting, s=CPU scheduling, b=other blocking (sleep), a=all off-CPU events. Requires bperf/blocked-samples kernel.')
+
+_run_parser.add_argument('--based-line',
+                         metavar='<source file>:<line number>',
+                         default=None,
+                         help='Target line for relational profiling (measures impact of another line on this one).')
+
+_run_parser.add_argument('--based-blocked',
+                         metavar='<subclass>',
+                         choices=['b', 'i', 'l', 's', 'a'],
+                         default=None,
+                         help='Off-CPU subclass for relational profiling base event.')
+
+_run_parser.add_argument('--based-speedup',
+                         metavar='<0-100>',
+                         type=int, choices=list(range(0, 101)), default=None,
+                         help='Fixed speedup percentage for relational profiling.')
 
 _run_parser.add_argument('--fixed-speedup',
                          metavar='<speedup> (0-100)',

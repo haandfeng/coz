@@ -39,7 +39,7 @@ public:
   
   inline std::shared_ptr<file> get_file() const { return _file.lock(); }
   inline size_t get_line() const { return _line; }
-  inline void add_sample() { _samples.fetch_add(1, std::memory_order_relaxed); }
+  inline void add_sample(uint64_t num = 1) { _samples.fetch_add(num, std::memory_order_relaxed); }
   inline size_t get_samples() const { return _samples.load(std::memory_order_relaxed); }
  
 private:

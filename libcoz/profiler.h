@@ -40,7 +40,7 @@ typedef int (*main_fn_t)(int, char**, char**);
 enum {
   SampleSignal = SIGPROF, //< Signal to generate when samples are ready
   SamplePeriod = 1000000, //< Time between samples (1ms)
-  SampleBatchSize = 10,   //< Samples to batch together for one processing run
+  SampleBatchSize = 10,    //< Samples to batch together for one processing run
   SpeedupDivisions = 20,  //< How many different speedups to try (20 = 5% increments)
   ZeroSpeedupWeight = 7,  //< Weight of speedup=0 versus other speedup values (7 = ~25% of experiments run with zero speedup)
   ExperimentMinTime = SamplePeriod * SampleBatchSize * 50,   //< Minimum experiment length (500ms)
@@ -69,7 +69,11 @@ public:
                int fixed_speedup,
                bool end_to_end,
                bool use_callchain,
-               size_t warmup_delay_ns = 0);
+               size_t warmup_delay_ns = 0,
+               char blocked_scope = 0,
+               line* based_line = nullptr,
+               char based_blocked = 0,
+               int based_speedup = -1);
 
   /// Shut down the profiler
   void shutdown();
@@ -130,6 +134,10 @@ public:
     }
     REQUIRE(state) << "Thread state not found";
 
+    if(_enable_print_log) {
+      state->enable_print_log = true;
+    }
+
     // Allocate a struct to pass as an argument to the new thread.
     // On macOS, cap to _global_delay to prevent children from inheriting
     // a stale-high local_delay that would cause them to skip delays.
@@ -169,16 +177,11 @@ public:
       return;
 
     // Handle all samples and add delays as required
-    if(_experiment_active) {
+    if(_experiment_active.load()) {
       state->set_in_use(true);
 #ifndef __APPLE__
-      // On Linux, samples accumulate in the per-thread perf_event buffer between
-      // timer signals (every 10ms).  Process pending samples so the delay counters
-      // are up-to-date before we potentially unblock another thread.
-      // process_samples() calls add_delays() at the end.
-      process_samples(state);
+      process_blocked_samples(state);
 #else
-      // On macOS, samples are processed centrally by the profiler thread.
       add_delays(state);
 #endif
       state->set_in_use(false);
@@ -190,9 +193,13 @@ public:
     thread_state* state = get_thread_state();
     if(!state)
       return;
+    if(state->in_wait)
+      return;
 
     state->is_blocked.store(true);
+    state->in_wait = true;
     state->pre_block_time = _global_delay.load();
+    state->ex_count = _experiment_active.load() ? ex_count.load() : 0;
   }
 
   /// Call after unblocking. If by_thread is true, delays will be skipped
@@ -200,26 +207,45 @@ public:
     thread_state* state = get_thread_state();
     if(!state)
       return;
+    if(state->in_wait == false)
+      return;
 
     state->set_in_use(true);
 
-    if(skip_delays) {
+    if(!_experiment_active.load()) {
+      state->local_delay.store(_global_delay.load());
+    } else if(skip_delays) {
       // Skip all delays that were inserted during the blocked period
-      state->local_delay.fetch_add(_global_delay.load() - state->pre_block_time);
+      size_t global_now = _global_delay.load();
+      size_t delta = global_now - state->pre_block_time;
+      if(delta > 0) {
+        state->local_delay.fetch_add(delta);
+      }
     }
 
     // Must clear is_blocked before process_samples() because add_delays()
     // (called at the end of process_samples()) returns early if is_blocked is true.
     state->is_blocked.store(false);
+    state->in_wait = false;
 
 #ifndef __APPLE__
-    // On Linux, process any samples that accumulated while this thread was
-    // blocked to bring its delay counters up to date (BCOZ fix).
-    if(_experiment_active) {
-      process_samples(state);
+    if(_experiment_active.load()) {
+      process_blocked_samples(state);
     }
 #endif
 
+    state->set_in_use(false);
+  }
+
+  void call_process_blocked_samples() {
+    thread_state* state = get_thread_state();
+    if(!state)
+      return;
+
+    state->set_in_use(true);
+#ifndef __APPLE__
+    process_blocked_samples(state);
+#endif
     state->set_in_use(false);
   }
 
@@ -234,10 +260,20 @@ private:
   profiler() : _warmup_delay_ns(0) {
     _experiment_active.store(false);
     _global_delay.store(0);
+    _based_global_delay.store(0);
     _delay_size.store(0);
+    _based_delay_size.store(0);
+    _blocked_all.store(0);
+    _blocked_io.store(0);
+    _blocked_sched.store(0);
+    _blocked_lock.store(0);
+    _blocked_blocked.store(0);
+    _blocked_oncpu.store(0);
     _selected_line.store(nullptr);
     _next_line.store(nullptr);
     _running.store(true);
+    ex_count.store(0);
+    print.store(false);
   }
 
   // Disallow copy and assignment
@@ -249,9 +285,11 @@ private:
   void end_sampling();                        //< Stop sampling in the current thread
   void add_delays(thread_state* state);       //< Add any required delays
   void process_samples(thread_state* state);  //< Process all available samples and insert delays
+  void process_blocked_samples(thread_state* state); //< Process blocked/off-CPU samples
   void process_all_samples();                 //< Process samples from all threads (for macOS profiler thread)
   void apply_pending_delays();                //< Apply pending delays using Mach thread suspension (macOS)
   std::pair<line*,bool> match_line(perf_event::record&);       //< Map a sample to its source line and matches with selected_line
+  bool based_match_line(perf_event::record&); //< Match a sample against the based line
   void log_samples(std::ofstream&, size_t);   //< Log runtime and sample counts for all identified regions
 
   thread_state* add_thread(); //< Add a thread state entry for this thread
@@ -276,9 +314,25 @@ private:
 
   std::atomic<bool> _experiment_active; //< Is an experiment running?
   std::atomic<size_t> _global_delay;    //< The global delay time required
+  std::atomic<size_t> _based_global_delay; //< Global delay for relational profiling
   std::atomic<size_t> _delay_size;      //< The current delay size
+  std::atomic<size_t> _based_delay_size; //< Relational profiling delay size
+  std::atomic<size_t> _blocked_all{0};
+  std::atomic<size_t> _blocked_io{0};
+  std::atomic<size_t> _blocked_lock{0};
+  std::atomic<size_t> _blocked_sched{0};
+  std::atomic<size_t> _blocked_blocked{0};
+  std::atomic<size_t> _blocked_oncpu{0};
   std::atomic<line*> _selected_line;    //< The line to speed up
   std::atomic<line*> _next_line;        //< The next line to speed up
+  line* _based_line = nullptr;          //< The relational profiling base line
+  char _blocked_scope = 0;              //< blocked scope selector
+  char _based_blocked = 0;              //< relational blocked scope selector
+  int _based_fixed_delay_size = -1;     //< fixed relational speedup
+  std::atomic<uint64_t> ex_count{0};    //< experiment counter
+  std::atomic<bool> print{false};       //< debug print toggle
+  int num_tid = 0;                      //< optional compatibility counter
+  bool omit_experiment = false;         //< skip experiment flag
 
   pthread_t _profiler_thread;     //< Handle for the profiler thread
   std::atomic<bool> _running;     //< Clear to signal the profiler thread to quit
@@ -295,6 +349,7 @@ private:
 
   /// Atomic flag to guarantee shutdown procedures run exactly one time
   std::atomic_flag _shutdown_run = ATOMIC_FLAG_INIT;
+  bool _enable_print_log = false; //< Optional per-thread debug logging
   size_t _warmup_delay_ns;        //< Warmup delay in nanoseconds
   std::atomic<bool> _warmup_complete{false}; //< Flag to indicate warmup is complete (used in process_samples)
 };

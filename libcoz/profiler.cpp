@@ -132,7 +132,11 @@ void profiler::startup(const string& outfile,
                        int fixed_speedup,
                        bool end_to_end,
                        bool use_callchain,
-                       size_t warmup_delay_ns) {
+                       size_t warmup_delay_ns,
+                       char blocked_scope,
+                       line* based_line,
+                       char based_blocked,
+                       int based_speedup) {
   _warmup_delay_ns = warmup_delay_ns;
   _use_callchain = use_callchain;
   // Set up the sampling signal handler.
@@ -175,10 +179,26 @@ void profiler::startup(const string& outfile,
 
   // If a non-empty fixed line was provided, set it
   if(fixed_line) _fixed_line = fixed_line;
+  _blocked_scope = (blocked_scope == 'n') ? 0 : blocked_scope;
+  _based_blocked = (based_blocked == 'n') ? 0 : based_blocked;
+  _based_line = based_line;
 
   // If the speedup amount is in bounds, set a fixed delay size
   if(fixed_speedup >= 0 && fixed_speedup <= 100)
     _fixed_delay_size = SamplePeriod * fixed_speedup / 100;
+  if(based_speedup >= 0 && based_speedup <= 100)
+    _based_fixed_delay_size = SamplePeriod * based_speedup / 100;
+
+#ifdef __APPLE__
+  if(_blocked_scope != 0) {
+    WARNING << "--blocked-scope requires Linux with blocked-samples kernel patch. Disabling.";
+    _blocked_scope = 0;
+  }
+  if(_based_blocked != 0) {
+    WARNING << "--based-blocked requires Linux with blocked-samples kernel patch. Disabling.";
+    _based_blocked = 0;
+  }
+#endif
 
   // Should end-to-end mode be enabled?
   _enable_end_to_end = end_to_end;
@@ -329,6 +349,19 @@ void profiler::profiler_thread(spinlock& l) {
 
     _delay_size.store(delay_size);
 
+    size_t based_delay_size;
+    if(_based_fixed_delay_size >= 0) {
+      based_delay_size = _based_fixed_delay_size;
+    } else {
+      size_t r = delay_dist(generator);
+      if(r <= ZeroSpeedupWeight) {
+        based_delay_size = 0;
+      } else {
+        based_delay_size = (r - ZeroSpeedupWeight) * SamplePeriod / SpeedupDivisions;
+      }
+    }
+    _based_delay_size.store(based_delay_size);
+
     // Save throughput point values at the start of the experiment
     vector<unique_ptr<throughput_point::saved>> saved_throughput_points;
     _throughput_points_lock.lock();
@@ -357,9 +390,21 @@ void profiler::profiler_thread(spinlock& l) {
     size_t start_time = get_time();
     size_t starting_samples = selected->get_samples();
     size_t starting_delay_time = _global_delay.load();
+    size_t starting_blocked_scope = 0;
+    if(_blocked_scope != 0) {
+      switch(_blocked_scope) {
+        case 'o': starting_blocked_scope = _blocked_oncpu.load(); break;
+        case 'i': starting_blocked_scope = _blocked_io.load(); break;
+        case 'l': starting_blocked_scope = _blocked_lock.load(); break;
+        case 's': starting_blocked_scope = _blocked_sched.load(); break;
+        case 'b': starting_blocked_scope = _blocked_blocked.load(); break;
+        case 'a': starting_blocked_scope = _blocked_all.load(); break;
+      }
+    }
 
     // Tell threads to start the experiment
     _experiment_active.store(true);
+    ex_count.fetch_add(1);
 
     // Wait until the experiment ends, or until shutdown if in end-to-end mode
     if(_enable_end_to_end) {
@@ -373,6 +418,7 @@ void profiler::profiler_thread(spinlock& l) {
 #endif
       }
     } else {
+      omit_experiment = false;
 #ifdef __APPLE__
       // On macOS, break the wait into chunks and process samples periodically.
       // Use wall clock time to bound the experiment duration, since overhead
@@ -391,10 +437,18 @@ void profiler::profiler_thread(spinlock& l) {
 #else
       wait(experiment_length);
 #endif
+      if(omit_experiment) {
+        omit_experiment = false;
+        _next_line.store(nullptr);
+        _experiment_active.store(false);
+        if(_running) wait(ExperimentCoolOffTime);
+        continue;
+      }
     }
 
     // Compute experiment parameters
     float speedup = (float)delay_size / (float)SamplePeriod;
+    float based_speedup = (float)based_delay_size / (float)SamplePeriod;
     size_t end_global_delay = _global_delay.load();
     size_t end_time = get_time();
     size_t experiment_delay = end_global_delay - starting_delay_time;
@@ -410,6 +464,17 @@ void profiler::profiler_thread(spinlock& l) {
     size_t duration = elapsed - experiment_delay;
 #endif
     size_t selected_samples = selected->get_samples() - starting_samples;
+    const char* scope_name = nullptr;
+    if(_blocked_scope != 0) {
+      switch(_blocked_scope) {
+        case 'o': scope_name = "ON_CPU"; selected_samples = _blocked_oncpu.load() - starting_blocked_scope; break;
+        case 'i': scope_name = "IO"; selected_samples = _blocked_io.load() - starting_blocked_scope; break;
+        case 'l': scope_name = "LOCK"; selected_samples = _blocked_lock.load() - starting_blocked_scope; break;
+        case 's': scope_name = "SCHEDULING"; selected_samples = _blocked_sched.load() - starting_blocked_scope; break;
+        case 'b': scope_name = "BLOCKED"; selected_samples = _blocked_blocked.load() - starting_blocked_scope; break;
+        case 'a': scope_name = "OFF_CPU"; selected_samples = _blocked_all.load() - starting_blocked_scope; break;
+      }
+    }
 
     // Keep a running count of the minimum delta over all progress points
     size_t min_delta = std::numeric_limits<size_t>::max();
@@ -444,10 +509,30 @@ void profiler::profiler_thread(spinlock& l) {
       }
 #endif
       if(_json_output) {
-        output << "{\"type\":\"experiment\",\"selected\":\"" << line_to_json_string(selected) << "\","
+        string selected_name = scope_name ? json_escape(scope_name) : line_to_json_string(selected);
+        output << "{\"type\":\"experiment\",\"selected\":\"" << selected_name << "\","
                << "\"speedup\":" << speedup << ","
                << "\"duration\":" << duration << ","
                << "\"selected_samples\":" << selected_samples;
+        if(scope_name) {
+          output << ",\"blocked_scope\":\"" << scope_name << "\"";
+        }
+        string based_target;
+        if(_based_line) {
+          based_target = line_to_json_string(_based_line);
+        } else if(_based_blocked != 0) {
+          switch(_based_blocked) {
+            case 'i': based_target = "IO"; break;
+            case 'l': based_target = "LOCK"; break;
+            case 's': based_target = "SCHEDULING"; break;
+            case 'b': based_target = "BLOCKED"; break;
+            case 'a': based_target = "OFF_CPU"; break;
+          }
+        }
+        if(!based_target.empty()) {
+          output << ",\"based_target\":\"" << based_target << "\""
+                 << ",\"based_speedup\":" << based_speedup;
+        }
 #ifndef __APPLE__
         if (_use_callchain && !merged_hit_callchains.empty()) {
           output << ",\"hit_callchains\":[";
@@ -462,11 +547,32 @@ void profiler::profiler_thread(spinlock& l) {
 #endif
         output << "}\n";
       } else {
-        output << "experiment\t"
-               << "selected=" << selected << "\t"
+        output << "experiment\tselected=";
+        if(scope_name) {
+          output << scope_name;
+        } else {
+          output << selected;
+        }
+        if(_based_line) {
+          output << "(" << line_to_json_string(_based_line) << "," << (based_speedup * 100.0f) << "%|)";
+        } else if(_based_blocked != 0) {
+          const char* based_scope_name = nullptr;
+          switch(_based_blocked) {
+            case 'i': based_scope_name = "IO"; break;
+            case 'l': based_scope_name = "LOCK"; break;
+            case 's': based_scope_name = "SCHEDULING"; break;
+            case 'b': based_scope_name = "BLOCKED"; break;
+            case 'a': based_scope_name = "OFF_CPU"; break;
+          }
+          if(based_scope_name) {
+            output << "(" << based_scope_name << "," << (based_speedup * 100.0f) << "%|)";
+          }
+        }
+        output << "\t"
                << "speedup=" << speedup << "\t"
                << "duration=" << duration << "\t"
-               << "selected-samples=" << selected_samples << "\n";
+               << "selected-samples=" << selected_samples << "\t"
+               << "delay=" << experiment_delay << "\n";
       }
 
       for(const auto& s : saved_throughput_points) {
@@ -598,12 +704,32 @@ void profiler::shutdown() {
 
 thread_state* profiler::add_thread() {
   pid_t tid = gettid();
-  thread_state* inserted = _thread_states.insert(tid);
-  if (inserted != nullptr) {
+  thread_state* state = _thread_states.insert(tid);
+  if (state != nullptr) {
     _num_threads_running += 1;
     VERBOSE << "Registered thread tid=" << tid;
+
+    state->local_delay.store(0);
+    state->based_local_delay = 0;
+    state->delayed_local_delay = 0;
+    state->pre_block_time = 0;
+    state->pre_local_time = 0;
+    state->process_samples.store(0);
+    state->ex_count = 1;
+    state->last_sample_time = 0;
+    state->in_wait = false;
+    state->is_blocked.store(false);
+    state->sync_local_with_global.store(false);
+    state->enable_print_log = _enable_print_log;
+    if(state->fout.is_open()) {
+      state->fout.close();
+    }
+#ifndef __APPLE__
+    state->_hit_callchains.clear();
+#endif
   }
-  return inserted;
+  num_tid++;
+  return state;
 }
 
 thread_state* profiler::get_thread_state() {
@@ -625,6 +751,13 @@ void* profiler::start_thread(void* p) {
   REQUIRE(state) << "Failed to add thread";
 
   state->local_delay.store(arg->_parent_delay_time);
+  state->process_samples.store(0);
+
+  string filename("print");
+  filename.append(to_string(gettid()) + ".txt");
+  if(state->enable_print_log) {
+    state->fout.open(filename);
+  }
 
   // Make local copies of the function and argument before freeing the arg wrapper
   thread_fn_t real_fn = arg->_fn;
@@ -637,6 +770,10 @@ void* profiler::start_thread(void* p) {
   // Run the real thread function
   void* result = real_fn(real_arg);
 
+  if(state->enable_print_log) {
+    state->fout.close();
+  }
+
   // Always exit via pthread_exit
   pthread_exit(result);
 }
@@ -648,11 +785,14 @@ void profiler::begin_sampling(thread_state* state) {
   memset(&pe, 0, sizeof(pe));
   pe.type = PERF_TYPE_SOFTWARE;
   pe.config = PERF_COUNT_SW_TASK_CLOCK;
-  pe.sample_type = PERF_SAMPLE_IP | PERF_SAMPLE_CALLCHAIN;
+  pe.sample_type = PERF_SAMPLE_IP | PERF_SAMPLE_CALLCHAIN | PERF_SAMPLE_WEIGHT | PERF_SAMPLE_TIME;
   pe.sample_period = SamplePeriod;
   pe.wakeup_events = SampleBatchSize; // This is ignored on linux 3.13 (why?)
   pe.exclude_idle = 1;
-  pe.exclude_kernel = 1;
+  pe.exclude_kernel = 0;
+  pe.exclude_user = 0;
+  pe.exclude_callchain_kernel = 0;
+  pe.exclude_callchain_user = 0;
   pe.disabled = 1;
 
   // Create this thread's perf_event sampler and start sampling
@@ -681,6 +821,19 @@ void profiler::end_sampling() {
 
     remove_thread();
   }
+}
+
+bool profiler::based_match_line(perf_event::record& sample) {
+  if(!_based_line) return false;
+
+  for(uint64_t pc : sample.get_callchain()) {
+    line* l = memory_map::get_instance().find_line(pc - 1).get();
+    if(l && l == _based_line) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 std::pair<line*,bool> profiler::match_line(perf_event::record& sample) {
@@ -722,47 +875,41 @@ std::pair<line*,bool> profiler::match_line(perf_event::record& sample) {
 }
 
 void profiler::add_delays(thread_state* state) {
-  // Add delays if there is an experiment running
   if(_experiment_active.load()) {
-    // Don't execute delays on threads that are blocked (e.g., in pthread_join).
-    // On macOS, wall-clock timers fire even on blocked threads, but these threads
-    // should not pause — post_block() will handle delay accounting on wake-up.
-    if(state->is_blocked.load()) return;
+    if(state->is_blocked.load() || state->in_wait) return;
 
-    // Take a snapshot of the global and local delays
     size_t global_delay = _global_delay.load();
-    size_t local = state->local_delay.load();
+    size_t local_delay = state->local_delay.load();
+    size_t based_global_delay = _based_global_delay.load();
+    size_t based_local_delay = state->based_local_delay;
 
 #ifdef __APPLE__
     g_delay_checks.fetch_add(1, std::memory_order_relaxed);
 #endif
 
-    // Is this thread ahead or behind on delays?
-    if(local > global_delay) {
+    if(based_local_delay > based_global_delay) {
+      _based_global_delay.fetch_add(based_local_delay - based_global_delay);
+    } else if(based_local_delay < based_global_delay &&
+              (based_global_delay - based_local_delay > 100000)) {
+      state->sampler.stop();
+      size_t waited = wait(based_global_delay - based_local_delay - 100000);
+      state->based_local_delay += waited;
+      state->sampler.start();
+    }
+
+    if(local_delay > global_delay) {
 #ifdef __APPLE__
-      // On macOS, process_all_samples() pushes _global_delay when crediting
-      // the sampled thread. Don't push it again here — overshoot from nanosleep
-      // would amplify _global_delay beyond elapsed time, causing underflow in
-      // the duration calculation.
       g_delays_skipped.fetch_add(1, std::memory_order_relaxed);
 #else
-      // Thread is ahead: increase the global delay time to make other threads pause
-      _global_delay.fetch_add(local - global_delay);
+      _global_delay.fetch_add(local_delay - global_delay);
 #endif
-
-    } else if(local < global_delay) {
-      // Thread is behind: Pause this thread to catch up
-
-      // Pause and record the exact amount of time this thread paused
-      size_t needed = global_delay - local;
+    } else if(local_delay < global_delay &&
+              (global_delay - local_delay > 100000)) {
       state->sampler.stop();
+      size_t needed = global_delay - local_delay - 100000;
       size_t waited = wait(needed);
 #ifdef __APPLE__
-      // Cap the increment to prevent nanosleep overshoot from inflating delays.
-      // macOS nanosleep has ~1ms granularity, and overshoot would propagate
-      // through the local > global branch, amplifying _global_delay.
       state->local_delay.fetch_add(needed);
-      // Track overshoot separately for duration correction
       if(waited > needed) {
         g_experiment_overshoot.fetch_add(waited - needed, std::memory_order_relaxed);
       }
@@ -774,46 +921,228 @@ void profiler::add_delays(thread_state* state) {
     }
 
   } else {
-    // Just skip ahead on delays if there isn't an experiment running
     state->local_delay.store(_global_delay.load());
+    state->based_local_delay = _based_global_delay.load();
   }
 }
 
-void profiler::process_samples(thread_state* state) {
+void profiler::process_blocked_samples(thread_state* state) {
+  bool process_blocked_sample = false;
+  size_t local_delay_inc = 0;
+
+  if(state->process_samples.load())
+    return;
+
+  state->process_samples.fetch_add(1);
+
   for(perf_event::record r : state->sampler) {
     if(!_warmup_complete.load(std::memory_order_relaxed))
       continue;
+
     if(r.is_sample()) {
-      // Find and match the line that contains this sample
+      REQUIRE(r.get_time() >= state->last_sample_time) << "Already processed sample!";
+      state->last_sample_time = r.get_time();
+
+      size_t sample_count = static_cast<size_t>(r.get_weight() + 1);
+
       std::pair<line*, bool> sampled_line = match_line(r);
       if(sampled_line.first) {
-        sampled_line.first->add_sample();
+        sampled_line.first->add_sample(sample_count);
       }
 
-      if(_experiment_active) {
-        // Add a delay if the sample is in the selected line
-        if(sampled_line.second) {
-          state->local_delay.fetch_add(_delay_size.load());
+      if(_experiment_active.load()) {
+        if(_based_blocked != 0) {
+          if(((_based_blocked == 'i') && r.is_io()) ||
+             ((_based_blocked == 'l') && r.is_lock()) ||
+             ((_based_blocked == 's') && r.is_sched()) ||
+             ((_based_blocked == 'b') && r.is_blocked()) ||
+             ((_based_blocked == 'a') && r.is_blocked_any())) {
+            state->based_local_delay += _based_delay_size.load() * sample_count;
+          }
+        } else if(_based_line && based_match_line(r)) {
+          state->based_local_delay += _based_delay_size.load() * sample_count;
+        }
+
+        if(_blocked_scope != 0) {
+          if((_blocked_scope == 'i') && r.is_io()) {
+            _blocked_io.fetch_add(sample_count);
+          } else if((_blocked_scope == 'l') && r.is_lock()) {
+            _blocked_lock.fetch_add(sample_count);
+          } else if((_blocked_scope == 's') && r.is_sched()) {
+            _blocked_sched.fetch_add(sample_count);
+          } else if((_blocked_scope == 'b') && r.is_blocked()) {
+            _blocked_blocked.fetch_add(sample_count);
+          } else if((_blocked_scope == 'a') && r.is_blocked_any()) {
+            _blocked_all.fetch_add(sample_count);
+          } else if((_blocked_scope == 'o') && !r.is_blocked_any()) {
+            _blocked_oncpu.fetch_add(sample_count);
 #ifndef __APPLE__
-          if (_use_callchain && r.get_callchain().size() > 0) {
+            if(_use_callchain && r.get_callchain().size() > 0) {
+              string chain = build_callchain_string(r);
+              if(!chain.empty()) {
+                state->_hit_callchain_lock.lock();
+                state->_hit_callchains[chain]++;
+                state->_hit_callchain_lock.unlock();
+              }
+            }
+#endif
+            state->delayed_local_delay += _delay_size.load() * sample_count;
+            continue;
+          } else {
+            continue;
+          }
+
+#ifndef __APPLE__
+          if(_use_callchain && r.get_callchain().size() > 0) {
             string chain = build_callchain_string(r);
-            if (!chain.empty()) {
+            if(!chain.empty()) {
               state->_hit_callchain_lock.lock();
               state->_hit_callchains[chain]++;
               state->_hit_callchain_lock.unlock();
             }
           }
 #endif
+          local_delay_inc += _delay_size.load() * sample_count;
+          process_blocked_sample = true;
+          continue;
         }
 
-      } else if(sampled_line.first != nullptr && _next_line.load() == nullptr
-                && !is_coz_header(sampled_line.first)) {
-        _next_line.store(sampled_line.first);
+        if(sampled_line.second && !r.is_lock()) {
+#ifndef __APPLE__
+          if(_use_callchain && r.get_callchain().size() > 0) {
+            string chain = build_callchain_string(r);
+            if(!chain.empty()) {
+              state->_hit_callchain_lock.lock();
+              state->_hit_callchains[chain]++;
+              state->_hit_callchain_lock.unlock();
+            }
+          }
+#endif
+          if(r.is_blocked_any()) {
+            local_delay_inc += _delay_size.load() * sample_count;
+            process_blocked_sample = true;
+          } else {
+            state->delayed_local_delay += _delay_size.load() * sample_count;
+          }
+        }
       }
     }
   }
 
+  if(_experiment_active.load()) {
+    if(process_blocked_sample) {
+      state->local_delay.fetch_add(local_delay_inc);
+      add_delays(state);
+    }
+  } else {
+    state->local_delay.store(_global_delay.load());
+    state->delayed_local_delay = 0;
+  }
+
+  state->process_samples.fetch_add(-1);
+}
+
+void profiler::process_samples(thread_state* state) {
+  if(state->process_samples.load())
+    return;
+
+  state->process_samples.fetch_add(1);
+
+  if(state->delayed_local_delay > 0) {
+    state->local_delay.fetch_add(state->delayed_local_delay);
+    state->delayed_local_delay = 0;
+  }
+
+  for(perf_event::record r : state->sampler) {
+    if(!_warmup_complete.load(std::memory_order_relaxed))
+      continue;
+
+    if(!r.is_sample())
+      continue;
+
+    REQUIRE(r.get_time() >= state->last_sample_time) << "Already processed sample!";
+    state->last_sample_time = r.get_time();
+
+    size_t sample_count = static_cast<size_t>(r.get_weight() + 1);
+
+    std::pair<line*, bool> sampled_line = match_line(r);
+    if(sampled_line.first) {
+      sampled_line.first->add_sample(sample_count);
+    }
+
+    if(_experiment_active.load()) {
+      if(_based_blocked != 0) {
+        if(((_based_blocked == 'i') && r.is_io()) ||
+           ((_based_blocked == 'l') && r.is_lock()) ||
+           ((_based_blocked == 's') && r.is_sched()) ||
+           ((_based_blocked == 'b') && r.is_blocked()) ||
+           ((_based_blocked == 'a') && r.is_blocked_any())) {
+          state->based_local_delay += _based_delay_size.load() * sample_count;
+        }
+      } else if(_based_line && based_match_line(r)) {
+        state->based_local_delay += _based_delay_size.load() * sample_count;
+      }
+
+      if(_blocked_scope != 0) {
+        bool target_hit = false;
+
+        if((_blocked_scope == 'i') && r.is_io()) {
+          _blocked_io.fetch_add(sample_count);
+          target_hit = true;
+        } else if((_blocked_scope == 'l') && r.is_lock()) {
+          _blocked_lock.fetch_add(sample_count);
+          target_hit = true;
+        } else if((_blocked_scope == 's') && r.is_sched()) {
+          _blocked_sched.fetch_add(sample_count);
+          target_hit = true;
+        } else if((_blocked_scope == 'b') && r.is_blocked()) {
+          _blocked_blocked.fetch_add(sample_count);
+          target_hit = true;
+        } else if((_blocked_scope == 'a') && r.is_blocked_any()) {
+          _blocked_all.fetch_add(sample_count);
+          target_hit = true;
+        } else if((_blocked_scope == 'o') && !r.is_blocked_any()) {
+          _blocked_oncpu.fetch_add(sample_count);
+          target_hit = true;
+        } else {
+          continue;
+        }
+
+#ifndef __APPLE__
+        if(target_hit && _use_callchain && r.get_callchain().size() > 0) {
+          string chain = build_callchain_string(r);
+          if(!chain.empty()) {
+            state->_hit_callchain_lock.lock();
+            state->_hit_callchains[chain]++;
+            state->_hit_callchain_lock.unlock();
+          }
+        }
+#endif
+        state->local_delay.fetch_add(_delay_size.load() * sample_count);
+        continue;
+      }
+
+      if(sampled_line.second && !r.is_lock()) {
+        state->local_delay.fetch_add(_delay_size.load() * sample_count);
+#ifndef __APPLE__
+        if(_use_callchain && r.get_callchain().size() > 0) {
+          string chain = build_callchain_string(r);
+          if(!chain.empty()) {
+            state->_hit_callchain_lock.lock();
+            state->_hit_callchains[chain]++;
+            state->_hit_callchain_lock.unlock();
+          }
+        }
+#endif
+      }
+    } else if(sampled_line.first != nullptr && _next_line.load() == nullptr
+              && !is_coz_header(sampled_line.first)) {
+      _next_line.store(sampled_line.first);
+    }
+  }
+
   add_delays(state);
+  state->process_samples.fetch_add(-1);
 }
 
 /**

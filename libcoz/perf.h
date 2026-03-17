@@ -32,6 +32,13 @@
 #define gettid() syscall(SYS_gettid)
 #endif
 
+#ifdef __linux__
+#define PERF_RECORD_MISC_LOCKWAIT   (64 << 0)
+#define PERF_RECORD_MISC_SCHED      (32 << 0)
+#define PERF_RECORD_MISC_IOWAIT     (16 << 0)
+#define PERF_RECORD_MISC_BLOCKED    (8 << 0)
+#endif
+
 // Workaround for missing hw_breakpoint.h include file:
 //   This include file just defines constants used to configure watchpoint registers.
 //   This will be constant across x86 systems.
@@ -109,6 +116,12 @@ public:
     stack = 0,
 #endif
 
+#if defined(PERF_SAMPLE_WEIGHT)
+    weight = PERF_SAMPLE_WEIGHT,
+#else
+    weight = 0,
+#endif
+
     _end = PERF_SAMPLE_MAX
   };
   
@@ -148,6 +161,17 @@ public:
     friend class perf_event::iterator;
   public:
     record_type get_type() const { return static_cast<record_type>(_header->type); }
+
+    inline bool is_lock() const { return (_header->misc & PERF_RECORD_MISC_LOCKWAIT) != 0; }
+    inline bool is_sched() const { return (_header->misc & PERF_RECORD_MISC_SCHED) != 0; }
+    inline bool is_io() const { return (_header->misc & PERF_RECORD_MISC_IOWAIT) != 0; }
+    inline bool is_blocked() const { return (_header->misc & PERF_RECORD_MISC_BLOCKED) != 0; }
+    inline bool is_blocked_any() const {
+      return (_header->misc & (PERF_RECORD_MISC_BLOCKED |
+                               PERF_RECORD_MISC_IOWAIT |
+                               PERF_RECORD_MISC_SCHED |
+                               PERF_RECORD_MISC_LOCKWAIT)) != 0;
+    }
     
     inline bool is_mmap() const { return get_type() == record_type::mmap; }
     inline bool is_lost() const { return get_type() == record_type::lost; }
@@ -166,6 +190,7 @@ public:
     uint64_t get_time() const;
     uint32_t get_cpu() const;
     ccutil::wrapped_array<uint64_t> get_callchain() const;
+    uint64_t get_weight() const;
     
   private:
     record(const perf_event& source, struct perf_event_header* header) :

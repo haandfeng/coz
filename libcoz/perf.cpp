@@ -297,6 +297,12 @@ wrapped_array<uint64_t> perf_event::record::get_callchain() const {
   return wrapped_array<uint64_t>(base, size);
 }
 
+uint64_t perf_event::record::get_weight() const {
+  ASSERT(is_sample()) << "Record is not a sample";
+  if(!_source.is_sampling(sample::weight)) return 0;
+  return *locate_field<sample::weight, uint64_t*>();
+}
+
 template<perf_event::sample s, typename T>
 T perf_event::record::locate_field() const {
   uintptr_t p = reinterpret_cast<uintptr_t>(_header) + sizeof(struct perf_event_header);
@@ -417,6 +423,12 @@ T perf_event::record::locate_field() const {
     return reinterpret_cast<T>(p);
   if(_source.is_sampling(sample::stack))
     FATAL << "Stack sampling is not supported";
+
+  /** weight **/
+  if(s == sample::weight)
+    return reinterpret_cast<T>(p);
+  if(_source.is_sampling(sample::weight))
+    p += sizeof(uint64_t);
 
   /** end **/
   if(s == sample::_end)
