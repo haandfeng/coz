@@ -11,13 +11,11 @@
 #include <atomic>
 #include <fstream>
 
-#include "ccutil/spinlock.h"
 #include "ccutil/timer.h"
 #include "perf.h"
 
 #ifndef __APPLE__
-#include <string>
-#include <unordered_map>
+#include "hit_callchains.h"
 #endif
 
 class thread_state {
@@ -41,8 +39,7 @@ public:
   std::ofstream fout;
 
 #ifndef __APPLE__
-  spinlock _hit_callchain_lock;
-  std::unordered_map<std::string, size_t> _hit_callchains;  //< callchain_str -> count (Linux only)
+  hit_callchains::Table _hit_callchain_table;
 #endif
   
   inline void set_in_use(bool value) {

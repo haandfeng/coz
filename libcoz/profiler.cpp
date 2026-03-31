@@ -8,6 +8,10 @@
 #include "profiler.h"
 
 #ifndef __APPLE__
+#include "hit_callchains.h"
+#endif
+
+#ifndef __APPLE__
   #include <asm/unistd.h>
 #else
   // macOS doesn't have gettid(), provide implementation
@@ -91,27 +95,10 @@ static string line_to_json_string(const line* l) {
   return json_escape(f->get_name() + ":" + to_string(l->get_line()));
 }
 
-#ifndef __APPLE__
-/// Build callchain string from perf record: "file1:line1|file2:line2|...|leaf_file:leaf_line" (root to leaf)
-static string build_callchain_string(perf_event::record& r) {
-  string result;
-  line* leaf = memory_map::get_instance().find_line(r.get_ip()).get();
-  if (!leaf) return "";
-
-  vector<string> parts;
-  for (uint64_t pc : r.get_callchain()) {
-    shared_ptr<line> l = memory_map::get_instance().find_line(pc - 1);
-    if (l) parts.push_back(line_to_json_string(l.get()));
-  }
-  parts.push_back(line_to_json_string(leaf));
-
-  for (size_t i = 0; i < parts.size(); i++) {
-    if (i > 0) result += "|";
-    result += parts[i];
-  }
-  return result;
+static uint32_t weighted_callchain_count(size_t sample_count) {
+  return static_cast<uint32_t>(
+      min<size_t>(sample_count, numeric_limits<uint32_t>::max()));
 }
-#endif
 
 /// Check if a line is from the coz.h instrumentation header
 static bool is_coz_header(const line* l) {
@@ -403,8 +390,14 @@ void profiler::profiler_thread(spinlock& l) {
     }
 
     // Tell threads to start the experiment
+    uint64_t experiment_id = ex_count.fetch_add(1) + 1;
+#ifndef __APPLE__
+    _thread_states.for_each([experiment_id](pid_t tid, thread_state* state) {
+      state->_hit_callchain_table.reset(experiment_id);
+    });
+    _active_experiment_id.store(experiment_id, std::memory_order_relaxed);
+#endif
     _experiment_active.store(true);
-    ex_count.fetch_add(1);
 
     // Wait until the experiment ends, or until shutdown if in end-to-end mode
     if(_enable_end_to_end) {
@@ -441,6 +434,9 @@ void profiler::profiler_thread(spinlock& l) {
         omit_experiment = false;
         _next_line.store(nullptr);
         _experiment_active.store(false);
+#ifndef __APPLE__
+        _active_experiment_id.store(0, std::memory_order_relaxed);
+#endif
         if(_running) wait(ExperimentCoolOffTime);
         continue;
       }
@@ -476,6 +472,23 @@ void profiler::profiler_thread(spinlock& l) {
       }
     }
 
+    _experiment_active.store(false);
+#ifndef __APPLE__
+    _active_experiment_id.store(0, std::memory_order_relaxed);
+    uint64_t merged_hit_callchains_dropped = 0;
+    if(_use_callchain) {
+      _thread_states.for_each([&](pid_t tid, thread_state* state) {
+        merged_hit_callchains_dropped +=
+            hit_callchains::collect_dropped(
+                state->_hit_callchain_table,
+                experiment_id);
+      });
+      _hit_callchains_dropped_total.fetch_add(
+          merged_hit_callchains_dropped,
+          std::memory_order_relaxed);
+    }
+#endif
+
     // Keep a running count of the minimum delta over all progress points
     size_t min_delta = std::numeric_limits<size_t>::max();
 
@@ -497,14 +510,12 @@ void profiler::profiler_thread(spinlock& l) {
     if(min_delta >= ExperimentTargetDelta) {
 #ifndef __APPLE__
       unordered_map<string, size_t> merged_hit_callchains;
-      if (_use_callchain) {
-        _thread_states.for_each([&merged_hit_callchains](pid_t tid, thread_state* state) {
-          state->_hit_callchain_lock.lock();
-          for (const auto& p : state->_hit_callchains) {
-            merged_hit_callchains[p.first] += p.second;
-          }
-          state->_hit_callchains.clear();
-          state->_hit_callchain_lock.unlock();
+      if(_use_callchain) {
+        _thread_states.for_each([&](pid_t tid, thread_state* state) {
+          hit_callchains::collect_table(
+              state->_hit_callchain_table,
+              experiment_id,
+              merged_hit_callchains);
         });
       }
 #endif
@@ -534,6 +545,9 @@ void profiler::profiler_thread(spinlock& l) {
                  << ",\"based_speedup\":" << based_speedup;
         }
 #ifndef __APPLE__
+        if(_use_callchain) {
+          output << ",\"hit_callchains_dropped\":" << merged_hit_callchains_dropped;
+        }
         if (_use_callchain && !merged_hit_callchains.empty()) {
           output << ",\"hit_callchains\":[";
           bool first = true;
@@ -572,7 +586,14 @@ void profiler::profiler_thread(spinlock& l) {
                << "speedup=" << speedup << "\t"
                << "duration=" << duration << "\t"
                << "selected-samples=" << selected_samples << "\t"
-               << "delay=" << experiment_delay << "\n";
+               << "delay=" << experiment_delay;
+#ifndef __APPLE__
+        if(_use_callchain) {
+          output << "\t"
+                 << "hit-callchains-dropped=" << merged_hit_callchains_dropped;
+        }
+#endif
+        output << "\n";
       }
 
       for(const auto& s : saved_throughput_points) {
@@ -625,9 +646,6 @@ void profiler::profiler_thread(spinlock& l) {
     // Clear the next line, so threads will select one
     _next_line.store(nullptr);
 
-    // End the experiment
-    _experiment_active.store(false);
-
     // Log samples after a while, then double the countdown
     if(--sample_log_countdown == 0) {
       log_samples(output, start_time);
@@ -646,15 +664,38 @@ void profiler::profiler_thread(spinlock& l) {
 
   output.flush();
   output.close();
+#ifndef __APPLE__
+  if(_use_callchain) {
+    fprintf(stderr,
+            "coz: hit_callchains_dropped_total=%llu\n",
+            static_cast<unsigned long long>(
+                _hit_callchains_dropped_total.load(std::memory_order_relaxed)));
+  }
+#endif
 }
 
 void profiler::log_samples(ofstream& output, size_t start_time) {
   // Log total runtime for phase correction
   if(_json_output) {
-    output << "{\"type\":\"runtime\",\"time\":" << (get_time() - start_time) << "}\n";
+    output << "{\"type\":\"runtime\",\"time\":" << (get_time() - start_time);
+#ifndef __APPLE__
+    if(_use_callchain) {
+      output << ",\"hit_callchains_dropped_total\":"
+             << _hit_callchains_dropped_total.load(std::memory_order_relaxed);
+    }
+#endif
+    output << "}\n";
   } else {
     output << "runtime\t"
-           << "time=" << (get_time() - start_time) << "\n";
+           << "time=" << (get_time() - start_time);
+#ifndef __APPLE__
+    if(_use_callchain) {
+      output << "\t"
+             << "hit-callchains-dropped-total="
+             << _hit_callchains_dropped_total.load(std::memory_order_relaxed);
+    }
+#endif
+    output << "\n";
   }
 
   // Log sample counts for all observed lines
@@ -725,7 +766,7 @@ thread_state* profiler::add_thread() {
       state->fout.close();
     }
 #ifndef __APPLE__
-    state->_hit_callchains.clear();
+    state->_hit_callchain_table.reset(0);
 #endif
   }
   num_tid++;
@@ -944,6 +985,7 @@ void profiler::process_blocked_samples(thread_state* state) {
       state->last_sample_time = r.get_time();
 
       size_t sample_count = static_cast<size_t>(r.get_weight() + 1);
+      uint32_t callchain_count = weighted_callchain_count(sample_count);
 
       std::pair<line*, bool> sampled_line = match_line(r);
       if(sampled_line.first) {
@@ -978,12 +1020,11 @@ void profiler::process_blocked_samples(thread_state* state) {
             _blocked_oncpu.fetch_add(sample_count);
 #ifndef __APPLE__
             if(_use_callchain && r.get_callchain().size() > 0) {
-              string chain = build_callchain_string(r);
-              if(!chain.empty()) {
-                state->_hit_callchain_lock.lock();
-                state->_hit_callchains[chain]++;
-                state->_hit_callchain_lock.unlock();
-              }
+              hit_callchains::record_hit(
+                  state->_hit_callchain_table,
+                  _active_experiment_id.load(std::memory_order_relaxed),
+                  r,
+                  callchain_count);
             }
 #endif
             state->delayed_local_delay += _delay_size.load() * sample_count;
@@ -994,12 +1035,11 @@ void profiler::process_blocked_samples(thread_state* state) {
 
 #ifndef __APPLE__
           if(_use_callchain && r.get_callchain().size() > 0) {
-            string chain = build_callchain_string(r);
-            if(!chain.empty()) {
-              state->_hit_callchain_lock.lock();
-              state->_hit_callchains[chain]++;
-              state->_hit_callchain_lock.unlock();
-            }
+            hit_callchains::record_hit(
+                state->_hit_callchain_table,
+                _active_experiment_id.load(std::memory_order_relaxed),
+                r,
+                callchain_count);
           }
 #endif
           local_delay_inc += _delay_size.load() * sample_count;
@@ -1010,12 +1050,11 @@ void profiler::process_blocked_samples(thread_state* state) {
         if(sampled_line.second && !r.is_lock()) {
 #ifndef __APPLE__
           if(_use_callchain && r.get_callchain().size() > 0) {
-            string chain = build_callchain_string(r);
-            if(!chain.empty()) {
-              state->_hit_callchain_lock.lock();
-              state->_hit_callchains[chain]++;
-              state->_hit_callchain_lock.unlock();
-            }
+            hit_callchains::record_hit(
+                state->_hit_callchain_table,
+                _active_experiment_id.load(std::memory_order_relaxed),
+                r,
+                callchain_count);
           }
 #endif
           if(r.is_blocked_any()) {
@@ -1064,6 +1103,7 @@ void profiler::process_samples(thread_state* state) {
     state->last_sample_time = r.get_time();
 
     size_t sample_count = static_cast<size_t>(r.get_weight() + 1);
+    uint32_t callchain_count = weighted_callchain_count(sample_count);
 
     std::pair<line*, bool> sampled_line = match_line(r);
     if(sampled_line.first) {
@@ -1110,12 +1150,11 @@ void profiler::process_samples(thread_state* state) {
 
 #ifndef __APPLE__
         if(target_hit && _use_callchain && r.get_callchain().size() > 0) {
-          string chain = build_callchain_string(r);
-          if(!chain.empty()) {
-            state->_hit_callchain_lock.lock();
-            state->_hit_callchains[chain]++;
-            state->_hit_callchain_lock.unlock();
-          }
+          hit_callchains::record_hit(
+              state->_hit_callchain_table,
+              _active_experiment_id.load(std::memory_order_relaxed),
+              r,
+              callchain_count);
         }
 #endif
         state->local_delay.fetch_add(_delay_size.load() * sample_count);
@@ -1126,12 +1165,11 @@ void profiler::process_samples(thread_state* state) {
         state->local_delay.fetch_add(_delay_size.load() * sample_count);
 #ifndef __APPLE__
         if(_use_callchain && r.get_callchain().size() > 0) {
-          string chain = build_callchain_string(r);
-          if(!chain.empty()) {
-            state->_hit_callchain_lock.lock();
-            state->_hit_callchains[chain]++;
-            state->_hit_callchain_lock.unlock();
-          }
+          hit_callchains::record_hit(
+              state->_hit_callchain_table,
+              _active_experiment_id.load(std::memory_order_relaxed),
+              r,
+              callchain_count);
         }
 #endif
       }

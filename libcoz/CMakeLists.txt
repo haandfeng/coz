@@ -1,5 +1,7 @@
 set(sources
     ${PROJECT_SOURCE_DIR}/include/coz.h
+    hit_callchains.cpp
+    hit_callchains.h
     inspect.cpp
     inspect.h
     lief_loader.cpp

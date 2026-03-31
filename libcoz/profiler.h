@@ -44,7 +44,7 @@ enum {
   SpeedupDivisions = 20,  //< How many different speedups to try (20 = 5% increments)
   ZeroSpeedupWeight = 7,  //< Weight of speedup=0 versus other speedup values (7 = ~25% of experiments run with zero speedup)
   ExperimentMinTime = SamplePeriod * SampleBatchSize * 50,   //< Minimum experiment length (500ms)
-  ExperimentCoolOffTime = SamplePeriod * SampleBatchSize,    //< Time to wait after an experiment
+  ExperimentCoolOffTime = SamplePeriod * SampleBatchSize * 6 / 5,  //< Time to wait after an experiment (12ms)
   ExperimentTargetDelta = 5 //< Target minimum number of visits to a progress point during an experiment
 };
 
@@ -313,6 +313,10 @@ private:
   std::atomic<size_t> _num_threads_running;         //< Number of threads that are currently being sampled
 
   std::atomic<bool> _experiment_active; //< Is an experiment running?
+  std::atomic<uint64_t> _active_experiment_id{0}; //< Current Linux callchain experiment id
+#ifndef __APPLE__
+  std::atomic<uint64_t> _hit_callchains_dropped_total{0}; //< Total dropped callchain inserts
+#endif
   std::atomic<size_t> _global_delay;    //< The global delay time required
   std::atomic<size_t> _based_global_delay; //< Global delay for relational profiling
   std::atomic<size_t> _delay_size;      //< The current delay size
