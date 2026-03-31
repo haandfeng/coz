@@ -1,3 +1,20 @@
+# This repos merge BCoz to Coz
+Thanks for Minwoo Anhn's Help
+https://github.com/s3yonsei/blocked_samples?tab=readme-ov-file
+```bash
+@inproceedings {298760,
+author = {Minwoo Ahn and Jeongmin Han and Youngjin Kwon and Jinkyu Jeong},
+title = {Identifying {On-/Off-CPU} Bottlenecks Together with Blocked Samples},
+booktitle = {18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24)},
+year = {2024},
+isbn = {978-1-939133-40-3},
+address = {Santa Clara, CA},
+pages = {893--910},
+url = {https://www.usenix.org/conference/osdi24/presentation/ahn},
+publisher = {USENIX Association},
+month = jul
+}
+```
 # Coz: Finding Code that Counts with Causal Profiling
 
 by [Charlie Curtsinger](https://curtsinger.cs.grinnell.edu/) and [Emery Berger](https://emeryberger.com)
