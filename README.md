@@ -15,6 +15,8 @@ publisher = {USENIX Association},
 month = jul
 }
 ```
+For more details please refer to [docs/](docs/)
+
 # Coz: Finding Code that Counts with Causal Profiling
 
 by [Charlie Curtsinger](https://curtsinger.cs.grinnell.edu/) and [Emery Berger](https://emeryberger.com)
