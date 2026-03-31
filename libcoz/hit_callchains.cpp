@@ -1,6 +1,7 @@
 #include "hit_callchains.h"
 
 #include <algorithm>
+#include <cinttypes>
 #include <string>
 #include <vector>
 
@@ -80,12 +81,24 @@ static bool raw_equals(const Bucket& bucket, perf_event::record& sample) {
   return true;
 }
 
+static string addr_fallback(uint64_t addr) {
+  char buf[32];
+  snprintf(buf, sizeof(buf), "[unknown@0x%" PRIx64 "]", addr);
+  return string(buf);
+}
+
 static string build_callchain_string_from_bucket(const Bucket& bucket) {
   string result;
 
-  line* leaf = memory_map::get_instance().find_line(bucket.leaf_ip).get();
-  if(!leaf) {
-    return "";
+  // Leaf: use hex fallback instead of discarding the entire chain
+  string leaf_str;
+  {
+    auto leaf = memory_map::get_instance().find_line(bucket.leaf_ip);
+    if(leaf) {
+      leaf_str = line_to_string(leaf.get());
+    } else {
+      leaf_str = addr_fallback(bucket.leaf_ip);
+    }
   }
 
   vector<string> parts;
@@ -93,9 +106,11 @@ static string build_callchain_string_from_bucket(const Bucket& bucket) {
     auto l = memory_map::get_instance().find_line(bucket.pcs[i] - 1);
     if(l) {
       parts.push_back(line_to_string(l.get()));
+    } else {
+      parts.push_back(addr_fallback(bucket.pcs[i]));
     }
   }
-  parts.push_back(line_to_string(leaf));
+  parts.push_back(leaf_str);
 
   for(size_t i = 0; i < parts.size(); i++) {
     if(i > 0) {
